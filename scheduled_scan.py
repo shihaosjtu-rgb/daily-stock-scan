@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 每日美股扫描（做多）：COIN NVDA GOOGL AVGO MU APP + SPY 环境
-数据：yfinance（日线2年 + 1小时60天），可选 Stooq 日线收盘价跨源核验。
+数据：yfinance（日线2年 + 1小时60天），单一来源（Yahoo），无跨源核验。
 
 用法
   python scheduled_scan.py --once          # 立即运行一次
@@ -121,23 +121,6 @@ def validate(df, kind, now, min_rows):
         elif gap >= 1:
             warn.append(f"日线最新K线 {df.index[-1].date()} 早于预期 {exp}（可能休市或数据延迟）")
     return crit, warn
-
-
-def xcheck(t, daily):
-    """Stooq 收盘价跨源核验。返回 (status, msg)，status: ok/bad/na。"""
-    try:
-        import urllib.request
-        url = f"https://stooq.com/q/d/l/?s={t.lower()}.us&i=d"
-        txt = urllib.request.urlopen(url, timeout=15).read().decode()
-        s = pd.read_csv(io.StringIO(txt), parse_dates=["Date"]).set_index("Date")
-        common = daily.index.intersection(s.index)
-        if len(common) == 0:
-            return "na", "跨源核验不可用（无共同日期）"
-        d = common[-1]
-        diff = abs(float(daily.close[d]) / float(s.Close[d]) - 1)
-        return ("ok" if diff < 0.01 else "bad"), f"Stooq {d.date()} 收盘差 {diff:.2%}"
-    except Exception as e:
-        return "na", f"跨源核验不可用（{type(e).__name__}）"
 
 
 def next_earnings(t):
@@ -270,12 +253,19 @@ def make_plan(d, ev, sup, res):
     if risk <= 0:
         return None
     cands = [res, d.high.iloc[-60:].max(), d.high.iloc[-120:].max(), d.high.iloc[-252:].max(), L.sma50, L.sma200]
-    tps = sorted({round(float(x), 2) for x in cands if x == x and x > entry + 0.5 * atr})
-    fill = [entry + risk * k for k in (1.5, 2.5, 4.0)]
-    tp = (tps + fill)[:3] if len(tps) >= 3 else tps + fill[len(tps):]
-    tp = sorted(tp)[:3]
-    for i in range(1, 3):
-        tp[i] = max(tp[i], tp[i - 1] + 0.1 * atr)
+    # TP1 至少 1R；相邻 TP 至少相隔 0.5R；优先取上方结构位，不足再用 R 倍数补齐
+    floor = entry + 1.0 * risk
+    tp = []
+    for x in sorted({round(float(x), 2) for x in cands if x == x}):
+        if x >= floor and (not tp or x >= tp[-1] + 0.5 * risk):
+            tp.append(x)
+        if len(tp) == 3:
+            break
+    for m in (1.5, 2.5, 4.0):
+        if len(tp) == 3:
+            break
+        lo = floor if not tp else tp[-1] + 0.5 * risk
+        tp.append(max(entry + m * risk, lo))
     R = [(x - entry) / risk for x in tp]
     return dict(entry=entry, stop=stop, risk=risk, risk_atr=risk / atr, tp=tp, R=R, rr=R[1],
                 wide_stop=risk / atr > 3.5)
@@ -303,20 +293,20 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
     def rs(n):
         return float(d.close.iloc[-1] / d.close.iloc[-1 - n] - 1 - (s.close.iloc[-1] / s.close.iloc[-1 - n] - 1))
     rsd = dict(rs1=rs(1), rs5=rs(5), rs20=rs(20))
-    plan = make_plan(d, ev, sup, res)
+    confirmed = [k for k in ("Spring", "Test", "SOS", "LPS") if k in ev]
+    plan = make_plan(d, ev, sup, res) if confirmed else None   # 无已确认事件不生成触发方案
     rr = plan["rr"] if plan else None
     sc = score_all(d, ev, rsd, spy_pts, rr)
     hc = hourly_check(h, plan["entry"]) if plan else None
-    confirmed = [k for k in ("Spring", "Test", "SOS", "LPS") if k in ev]
     miss = []
-    if not confirmed: miss.append("日线无 Spring/Test/SOS/LPS 候选事件")
-    if plan is None: miss.append("无有效止损（止损≥入场）")
+    if not confirmed: miss.append("日线无 Spring/Test/SOS/LPS 候选事件，不生成触发方案")
+    elif plan is None: miss.append("无有效止损（止损≥入场）")
     elif plan["rr"] < MIN_RR: miss.append(f"预期R:R(TP2)={plan['rr']:.1f}<{MIN_RR:.0f}")
     elif plan["wide_stop"]: miss.append(f"止损过宽({plan['risk_atr']:.1f}ATR)")
     if sc["total"] < MIN_EXEC_SCORE: miss.append(f"评分{sc['total']}<{MIN_EXEC_SCORE}")
-    if hc is None: miss.append("1小时数据不足")
-    elif not hc["triggered"]: miss.append(f"1h收盘未突破触发价{plan['entry']:.2f}或量能<1.2x" if plan else "无1h触发")
-    if xc[0] == "bad": miss.append("跨源价格核验不一致")
+    if plan is not None:
+        if hc is None: miss.append("1小时数据不足")
+        elif not hc["triggered"]: miss.append(f"1h收盘未突破触发价{plan['entry']:.2f}或量能<1.2x")
     execu = not miss
     dist = (plan["entry"] / L.close - 1) if plan else None
     return dict(ticker=t, asof=str(d.index[-1].date()), price=float(L.close), chg1=float(L.close / P.close - 1),
@@ -346,7 +336,7 @@ def pct(x): return f"{x:+.2%}"
 def build_report(env, rows, failures, now, notes):
     jst = now.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
     L = [f"# 每日美股扫描（做多）— 运行 {now.strftime('%Y-%m-%d %H:%M ET')} / {jst}",
-         "数据源：Yahoo Finance(yfinance) 日线+1小时，已剔除未收盘K线；Stooq 收盘价跨源核验（尽力而为）。", ""]
+         "数据源：Yahoo Finance(yfinance) 单一来源，日线+1小时，已剔除未收盘K线；**未做跨源核验**，关键价位请对照券商行情确认。", ""]
     if notes:
         L += ["**数据说明**"] + [f"- {n}" for n in notes] + [""]
     L += ["## 一、市场总体判断（SPY）"]
@@ -381,13 +371,16 @@ def build_report(env, rows, failures, now, notes):
         if pl:
             L.append(f"- 条件性方案（需先满足触发）：触发价 {pl['entry']:.2f}；技术止损 {pl['stop']:.2f}（风险{pl['risk_atr']:.1f}ATR）；"
                      f"TP1/TP2/TP3 = {pl['tp'][0]:.2f}/{pl['tp'][1]:.2f}/{pl['tp'][2]:.2f}（{pl['R'][0]:.1f}R/{pl['R'][1]:.1f}R/{pl['R'][2]:.1f}R，预期R:R按TP2计）")
+        else:
+            L.append("- 触发方案：未生成（无已确认的 Spring/Test/SOS/LPS 候选事件，或止损无效）")
         if hc:
             L.append(f"- 1h最新已收盘K线 {hc['time']}：收 {hc['close']:.2f}，量能 {hc['rvol']:.2f}x → {'已触发' if hc['triggered'] else '未触发'}")
         if r["missing"]:
             L.append("- 缺失条件：" + "；".join(r["missing"]))
         if r.get("earnings"):
             L.append(f"- 下次财报（Yahoo，需自行核对）：{r['earnings']}")
-        L.append(f"- 数据核验：{r['xcheck']}" + ("；" + "；".join(r["data_warnings"]) if r["data_warnings"] else ""))
+        if r["data_warnings"]:
+            L.append("- 数据提示：" + "；".join(r["data_warnings"]))
     ex = [r for r in rows if r["executable"]]
     L += ["", "## 四、当日结论"]
     if ex:
@@ -448,7 +441,7 @@ def deliver(full, now):
 
 
 # ----------------------------------------------------------------- 主流程
-def run(now=None, fetcher=fetch, do_xcheck=True, earnings=True):
+def run(now=None, fetcher=fetch, earnings=True):
     now = now or dt.datetime.now(NY)
     names = TICKERS + [BENCH]
     notes, failures, rows = [], {}, []
@@ -485,7 +478,7 @@ def run(now=None, fetcher=fetch, do_xcheck=True, earnings=True):
         if crit or env is None:
             failures[t] = "；".join(crit) if crit else "SPY环境缺失"
             continue
-        xc = xcheck(t, d) if do_xcheck else ("na", "跨源核验已关闭")
+        xc = ("na", "仅Yahoo单一来源")
         try:
             r = analyze(t, d, H[t][0], sd, env["pts"], xc, warn + H[t][1])
             r["earnings"] = next_earnings(t) if earnings else None
@@ -739,7 +732,7 @@ def selftest():
         return out
     global OUT
     OUT = Path("selftest_reports")
-    rep = run(now=now, fetcher=fake, do_xcheck=False, earnings=False)
+    rep = run(now=now, fetcher=fake, earnings=False)
     assert "每日美股扫描" in rep and "NVDA" in rep
     print("\nSELFTEST OK")
 
@@ -753,11 +746,10 @@ if __name__ == "__main__":
     g.add_argument("--backtest", action="store_true")
     ap.add_argument("--years", type=float, default=1.0)
     ap.add_argument("--min-score", type=int, default=None, help="覆盖可执行信号评分门槛（默认70）")
-    ap.add_argument("--no-xcheck", action="store_true")
     a = ap.parse_args()
     if a.min_score is not None:
         MIN_EXEC_SCORE = a.min_score
     if a.selftest: selftest()
     elif a.backtest: run_backtest(a.years)
     elif a.daemon: daemon()
-    else: run(do_xcheck=not a.no_xcheck)
+    else: run()
