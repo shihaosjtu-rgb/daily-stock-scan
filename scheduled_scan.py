@@ -145,7 +145,11 @@ def next_earnings(t):
         import yfinance as yf
         cal = yf.Ticker(t).calendar
         e = cal.get("Earnings Date") if isinstance(cal, dict) else None
-        return str(e[0]) if e else None
+        if not e:
+            return None
+        d0 = e[0]
+        d0 = d0.date() if hasattr(d0, "date") else d0
+        return str(d0) if d0 >= dt.date.today() else None
     except Exception:
         return None
 
@@ -188,7 +192,7 @@ def detect(d, sup, res):
             ev["Spring"] = (ts, f"最低{b.low:.2f}刺破支撑{sup:.2f}后收回，收{b.close:.2f}，RVOL20={b.rvol20:.2f}")
     for ts, b in last5.iterrows():
         atr = b.atr14
-        if (("Spring" in ev and ts > ev["Spring"][0]) or ("SC?" in ev and "Spring" not in ev)) \
+        if (("Spring" in ev and ts > ev["Spring"][0]) or ("SC?" in ev and "Spring" not in ev and ts > ev["SC?"][0])) \
                 and sup - 0.25 * atr <= b.low <= sup + 0.5 * atr and b.rvol20 < 0.8 and b.close > sup:
             ev["Test"] = (ts, f"回测支撑附近(低{b.low:.2f})，缩量RVOL20={b.rvol20:.2f}，收回支撑之上")
     for ts, b in last5.iterrows():
@@ -202,7 +206,9 @@ def detect(d, sup, res):
     return ev
 
 
-def phase_of(L, ev):
+def phase_of(L, ev, sup=None):
+    if sup is not None and L.close <= sup and ("Spring" in ev or "Test" in ev) and "SOS" not in ev:
+        return "收盘仍在区间支撑下方（吸筹未确认）"
     if "SOS" in ev or "LPS" in ev:
         return "Phase D（候选）"
     if "Spring" in ev or "Test" in ev:
@@ -241,8 +247,9 @@ def score_all(d, ev, rs, spy_pts, rr):
     # SPY环境 15
     env = spy_pts + (3 if rs["rs20"] > 0 else 0) + (1 if rs["rs5"] > 0 else 0)
     # 风险收益比 10
-    rrp = 0 if rr is None or rr < 2 else (7 if rr < 3 else 10)
-    if rr is not None and 1 <= rr < 2: rrp = 3
+    has = any(k in ev for k in ("Spring", "Test", "SOS", "LPS"))
+    rrp = 0 if (rr is None or rr < 2 or not has) else (7 if rr < 3 else 10)
+    if has and rr is not None and 1 <= rr < 2: rrp = 3
     total = int(wy + vol + ma + env + rrp)
     grade = "A" if total >= 85 else "B" if total >= 70 else "C" if total >= 55 else "D"
     return dict(wyckoff=int(wy), volume=int(vol), ma=int(ma), env=int(env), rr=int(rrp), total=total,
@@ -316,7 +323,7 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
                 support=sup, resistance=res, atr14=float(L.atr14), rvol20=float(L.rvol20),
                 ema20=float(L.ema20), sma50=float(L.sma50), sma200=float(L.sma200),
                 slopes=dict(ema20=float(L.ema20_slope), sma50=float(L.sma50_slope), sma200=float(L.sma200_slope)),
-                phase=phase_of(L, ev), events={k: [str(v[0].date()), v[1]] for k, v in ev.items()},
+                phase=phase_of(L, ev, sup), events={k: [str(v[0].date()), v[1]] for k, v in ev.items()},
                 rs=rsd, score=sc, plan=plan, hourly=hc, missing=miss, executable=execu,
                 dist_to_entry=dist, xcheck=xc[1], data_warnings=warns)
 
