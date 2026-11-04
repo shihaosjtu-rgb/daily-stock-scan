@@ -1,0 +1,56 @@
+name: daily-scan
+
+on:
+  schedule:
+    # 周一至周五 22:30 UTC = 美东 17:30(夏令时)/18:30(冬令时)，均在收盘后；GitHub 定时任务可能延迟数分钟
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch: {}   # 允许在 Actions 页面手动运行
+
+permissions:
+  contents: write         # 需要把报告和数据提交回仓库
+
+concurrency:
+  group: daily-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily scan
+        env:
+          SCAN_OUT: reports
+          SCAN_DUMP_DIR: data
+          # 以下推送均为可选：在仓库 Settings > Secrets and variables > Actions 里添加才会生效
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python scheduled_scan.py --once
+
+      - name: Commit reports and data
+        run: |
+          git config user.name "daily-scan-bot"
+          git config user.email "daily-scan-bot@users.noreply.github.com"
+          git add reports data
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "daily scan $(date -u +%F)"
+            git pull --rebase
+            git push
+          fi
