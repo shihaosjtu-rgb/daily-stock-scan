@@ -336,7 +336,7 @@ def pct(x): return f"{x:+.2%}"
 def build_report(env, rows, failures, now, notes):
     jst = now.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
     L = [f"# 每日美股扫描（做多）— 运行 {now.strftime('%Y-%m-%d %H:%M ET')} / {jst}",
-         "数据源：Yahoo Finance(yfinance) 单一来源，日线+1小时，已剔除未收盘K线；**未做跨源核验**，关键价位请对照券商行情确认。", ""]
+         "数据源：**仅 Yahoo 单一来源**（yfinance），日线+1小时，已剔除未收盘K线；未做跨源核验，关键价位请对照券商行情确认。", ""]
     if notes:
         L += ["**数据说明**"] + [f"- {n}" for n in notes] + [""]
     L += ["## 一、市场总体判断（SPY）"]
