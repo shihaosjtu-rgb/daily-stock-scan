@@ -173,6 +173,13 @@ def detect(d, sup, res):
         atr = b.atr14
         if b.low < sup and b.close > sup:
             ev["Spring"] = (ts, f"最低{b.low:.2f}刺破支撑{sup:.2f}后收回，收{b.close:.2f}，RVOL20={b.rvol20:.2f}")
+    if "Spring" in ev:  # Spring 之后若有收盘跌破其最低点，视为失败而非吸筹
+        sts = ev["Spring"][0]
+        slow = float(d.low[sts])
+        fail = d[(d.index > sts) & (d.close < slow)]
+        if len(fail):
+            ev.pop("Spring")
+            ev["Spring失败"] = (fail.index[0], f"收盘跌破Spring低点{slow:.2f}（{fail.index[0].date()}收{fail.close.iloc[0]:.2f}），吸筹假设作废")
     for ts, b in last5.iterrows():
         atr = b.atr14
         if (("Spring" in ev and ts > ev["Spring"][0]) or ("SC?" in ev and "Spring" not in ev and ts > ev["SC?"][0])) \
@@ -190,6 +197,8 @@ def detect(d, sup, res):
 
 
 def phase_of(L, ev, sup=None):
+    if "Spring失败" in ev and not any(k in ev for k in ("Test", "SOS", "LPS")):
+        return "Spring失败（收盘跌破Spring低点），吸筹假设作废"
     if sup is not None and L.close <= sup and ("Spring" in ev or "Test" in ev) and "SOS" not in ev:
         return "收盘仍在区间支撑下方（吸筹未确认）"
     if "SOS" in ev or "LPS" in ev:
@@ -250,7 +259,7 @@ def make_plan(d, ev, sup, res):
     else: low = d.low.iloc[-5:].min()
     stop = float(low - 0.5 * atr)
     risk = entry - stop
-    if risk <= 0:
+    if risk <= 0 or stop >= float(d.close.iloc[-1]):  # 止损高于现价=已被触及，方案无效
         return None
     cands = [res, d.high.iloc[-60:].max(), d.high.iloc[-120:].max(), d.high.iloc[-252:].max(), L.sma50, L.sma200]
     # TP1 至少 1R；相邻 TP 至少相隔 0.5R；优先取上方结构位，不足再用 R 倍数补齐
@@ -300,7 +309,7 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
     hc = hourly_check(h, plan["entry"]) if plan else None
     miss = []
     if not confirmed: miss.append("日线无 Spring/Test/SOS/LPS 候选事件，不生成触发方案")
-    elif plan is None: miss.append("无有效止损（止损≥入场）")
+    elif plan is None: miss.append("无有效止损（止损≥入场或已高于现价）")
     elif plan["rr"] < MIN_RR: miss.append(f"预期R:R(TP2)={plan['rr']:.1f}<{MIN_RR:.0f}")
     elif plan["wide_stop"]: miss.append(f"止损过宽({plan['risk_atr']:.1f}ATR)")
     if sc["total"] < MIN_EXEC_SCORE: miss.append(f"评分{sc['total']}<{MIN_EXEC_SCORE}")
