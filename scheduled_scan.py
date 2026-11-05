@@ -310,7 +310,7 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
     miss = []
     if not confirmed: miss.append("日线无 Spring/Test/SOS/LPS 候选事件，不生成触发方案")
     elif plan is None: miss.append("无有效止损（止损≥入场或已高于现价）")
-    elif plan["rr"] < MIN_RR: miss.append(f"预期R:R(TP2)={plan['rr']:.1f}<{MIN_RR:.0f}")
+    elif plan["rr"] < MIN_RR: miss.append(f"预期R:R(TP2)={plan['rr']:.2f}<{MIN_RR:.0f}")
     elif plan["wide_stop"]: miss.append(f"止损过宽({plan['risk_atr']:.1f}ATR)")
     if sc["total"] < MIN_EXEC_SCORE: miss.append(f"评分{sc['total']}<{MIN_EXEC_SCORE}")
     if plan is not None:
@@ -379,7 +379,7 @@ def build_report(env, rows, failures, now, notes):
         L.append(f"- 评分：Wyckoff {sc['wyckoff']}/30 + 量能 {sc['volume']}/25 + 均线 {sc['ma']}/20 + SPY环境 {sc['env']}/15 + R:R {sc['rr']}/10 = **{sc['total']}（{sc['grade']}级）**")
         if pl:
             L.append(f"- 条件性方案（需先满足触发）：触发价 {pl['entry']:.2f}；技术止损 {pl['stop']:.2f}（风险{pl['risk_atr']:.1f}ATR）；"
-                     f"TP1/TP2/TP3 = {pl['tp'][0]:.2f}/{pl['tp'][1]:.2f}/{pl['tp'][2]:.2f}（{pl['R'][0]:.1f}R/{pl['R'][1]:.1f}R/{pl['R'][2]:.1f}R，预期R:R按TP2计）")
+                     f"TP1/TP2/TP3 = {pl['tp'][0]:.2f}/{pl['tp'][1]:.2f}/{pl['tp'][2]:.2f}（{pl['R'][0]:.2f}R/{pl['R'][1]:.2f}R/{pl['R'][2]:.2f}R，预期R:R按TP2计）")
         else:
             L.append("- 触发方案：未生成（无已确认的 Spring/Test/SOS/LPS 候选事件，或止损无效）")
         if hc:
@@ -397,7 +397,8 @@ def build_report(env, rows, failures, now, notes):
             L.append(f"- **{r['ticker']}** 满足全部过滤条件：触发价 {r['plan']['entry']:.2f}，止损 {r['plan']['stop']:.2f}，TP2 R:R {r['plan']['rr']:.1f}")
     else:
         L.append("**今日无合格信号。**")
-        near = sorted(rows, key=lambda r: (len(r["missing"]), -r["score"]["total"]))[:2]
+        near = sorted(rows, key=lambda r: (not any(k in r["events"] for k in ("Spring", "Test", "SOS", "LPS")),
+                                           len(r["missing"]), -r["score"]["total"]))[:2]
         for r in near:
             L.append(f"- 最接近：{r['ticker']}（{r['score']['total']}分）缺：{'；'.join(r['missing'])}")
     watch = [r for r in rows if not r["executable"] and r["score"]["total"] >= WATCH_SCORE]
