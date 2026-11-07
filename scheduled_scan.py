@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-每日美股扫描（做多）：COIN NVDA GOOGL AVGO MU APP + SPY 环境
+每日美股扫描（做多）：TICKERS 列表中的股票 + SPY 环境
 数据：yfinance（日线2年 + 1小时60天），单一来源（Yahoo），无跨源核验。
 
 用法
@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-TICKERS = ["COIN", "NVDA", "GOOGL", "AVGO", "MU", "APP"]
+TICKERS = ["COIN", "NVDA", "GOOGL", "AVGO", "MU", "APP", "FIG", "SOFI", "ASML", "NBIS", "VST"]
 BENCH = "SPY"
 NY, JST = ZoneInfo("America/New_York"), ZoneInfo("Asia/Tokyo")
 OUT = Path(os.environ.get("SCAN_OUT", "reports"))
@@ -355,7 +355,7 @@ def build_report(env, rows, failures, now, notes):
                  f"位于 {'、'.join(env['above']) or '全部关键均线下方'} 之上。环境评分 {env['pts']}/11 → **{env['label']}**。")
     else:
         L.append("SPY 数据缺失或未通过校验，环境无法判断，所有标的不给可执行信号。")
-    L += ["", "## 二、六只股票对比", "",
+    L += ["", f"## 二、{len(TICKERS)}只股票对比", "",
           "| 标的 | 收盘/日期 | 日涨跌 | 趋势/阶段 | 事件 | RVOL20 | 相对SPY(5d/20d) | 评分/等级 | 状态 |",
           "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
@@ -665,8 +665,8 @@ def bt_report(trades, stat, years, now, sigs=None):
     elif sigs is not None:
         L += ["", "## 信号分布", "回测期内没有任何信号同时满足事件、止损/R:R过滤且评分≥55。"]
     L += ["", "## 解读与局限（请务必阅读）",
-          "- **样本小**：六只股票、一年、规则很严，笔数通常很少，胜率和平均R的统计误差很大，不能据此认定规则有效或无效。",
-          "- **幸存者/选股偏差**：这六只是今天选定的标的，回测期间的表现带有事后选择的影响。",
+          "- **样本小**：少数几只股票、一年、规则很严，笔数通常很少，胜率和平均R的统计误差很大，不能据此认定规则有效或无效。",
+          "- **幸存者/选股偏差**：这些股票是今天选定的标的，回测期间的表现带有事后选择的影响。",
           "- **1h触发被日线替代**：实盘要求1小时K线收盘确认，回测只要求日内最高价触及，成交更容易，结果偏乐观。",
           "- **未计入**：真实滑点与冲击成本、财报跳空对止损的影响、复权数据差异；Yahoo日线成交量可能不是全市场合并量。",
           "- **参数未优化**：阈值（RVOL、ATR倍数、评分权重）均为初始设定，不要在这一年数据上反复调参再拿同一段验证。",
