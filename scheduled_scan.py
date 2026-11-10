@@ -171,7 +171,7 @@ def detect(d, sup, res):
     last5 = d.iloc[-5:]
     for ts, b in last5.iterrows():
         atr = b.atr14
-        if b.low < sup and b.close > sup:
+        if b.low < sup and b.close > sup + 0.25 * atr:  # 收回须高于支撑至少0.25ATR，过滤贴线的弱收回
             ev["Spring"] = (ts, f"最低{b.low:.2f}刺破支撑{sup:.2f}后收回，收{b.close:.2f}，RVOL20={b.rvol20:.2f}")
     if "Spring" in ev:  # Spring 之后若有收盘跌破其最低点，视为失败而非吸筹
         sts = ev["Spring"][0]
@@ -215,11 +215,18 @@ def phase_of(L, ev, sup=None):
 
 
 # ----------------------------------------------------------------- 评分
+DECAY = [1.0, 0.8, 0.6, 0.4, 0.25]   # 事件距今第0/1/2/3/4+根K线的权重：信号越旧，参考价值越低
+
+
 def score_all(d, ev, rs, spy_pts, rr):
     L = d.iloc[-1]
+
+    def _w(k):
+        age = int(len(d) - 1 - d.index.get_loc(ev[k][0]))
+        return DECAY[min(age, len(DECAY) - 1)]
     # Wyckoff 30（无事件时仅给趋势基础分，最多8）
     pts = {"Spring": 8, "Test": 6, "SOS": 10, "LPS": 6}
-    wy = sum(v for k, v in pts.items() if k in ev)
+    wy = sum(v * _w(k) for k, v in pts.items() if k in ev)
     if wy == 0:
         wy = 8 if (L.close > L.sma200 and L.sma200_slope > 0) else (4 if L.close > L.sma50 else 0)
     wy = min(30, wy + (4 if ("SC?" in ev and wy >= 8) else 0))
@@ -228,14 +235,19 @@ def score_all(d, ev, rs, spy_pts, rr):
     upv, dnv = l20.volume[l20.up].mean(), l20.volume[~l20.up].mean()
     ratio = (upv / dnv) if (dnv and not np.isnan(dnv) and not np.isnan(upv)) else np.nan
     vol = 0
-    if "SOS" in ev: vol += 8
+    if "SOS" in ev: vol += 8 * _w("SOS")
     vol += 8 if ratio > 1.2 else (4 if ratio > 1.0 else 0)
-    if "LPS" in ev or "Test" in ev: vol += 5
+    if "LPS" in ev or "Test" in ev: vol += 5 * max(_w(k) for k in ("LPS", "Test") if k in ev)
     if L.up and L.rvol20 >= 1.2: vol += 4
     vol = min(25, vol)
     # 均线 20
     ma = 4 * (L.close > L.ema20) + 4 * (L.ema20 > L.sma50) + 4 * (L.sma50 > L.sma200) + 4 * (L.close > L.sma200)
     ma += round(4 * ((L.ema20_slope > 0) + (L.sma50_slope > 0) + (L.sma200_slope > 0)) / 3)
+    # 均线分封顶：价格离EMA20越远（延伸），均线多头排列越像'事后确认'，上限从20逐步压到8
+    ext_ema = float((L.close - L.ema20) / L.atr14)
+    ma_cap = 20 if ext_ema <= 2 else max(8, 20 - int(round(4 * (ext_ema - 2))))
+    ma_capped = bool(ma > ma_cap)
+    ma = min(ma, ma_cap)
     # SPY环境 15
     env = spy_pts + (3 if rs["rs20"] > 0 else 0) + (1 if rs["rs5"] > 0 else 0)
     # 风险收益比 10
@@ -245,11 +257,111 @@ def score_all(d, ev, rs, spy_pts, rr):
     total = int(wy + vol + ma + env + rrp)
     grade = "A" if total >= 85 else "B" if total >= 70 else "C" if total >= 55 else "D"
     return dict(wyckoff=int(wy), volume=int(vol), ma=int(ma), env=int(env), rr=int(rrp), total=total,
-                grade=grade, updown_vol_ratio=None if np.isnan(ratio) else round(float(ratio), 2))
+                grade=grade, updown_vol_ratio=None if np.isnan(ratio) else round(float(ratio), 2),
+                ma_capped=ma_capped, decay={k: round(_w(k), 2) for k in pts if k in ev})
+
+
+# ----------------------------------------------------------------- 日线/周线支撑压力
+def _pivots(df, k):
+    """分形拐点：左右各k根K线内的最高点/最低点。需等k根K线之后才确认，因此不含未来数据。"""
+    hi, lo = df.high.values, df.low.values
+    ph, pl = [], []
+    for i in range(k, len(df) - k):
+        if hi[i] >= hi[i - k:i + k + 1].max():
+            ph.append(float(hi[i]))
+        if lo[i] <= lo[i - k:i + k + 1].min():
+            pl.append(float(lo[i]))
+    return ph, pl
+
+
+def weekly_bars(d):
+    """日线合成周线（周五收盘）；本周未走完时丢弃最后一根，避免用未完成周线。"""
+    w = d[["open", "high", "low", "close", "volume"]].resample("W-FRI").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+    if len(w) and w.index[-1].date() > d.index[-1].date():
+        w = w.iloc[:-1]
+    return w
+
+
+def sr_levels(d):
+    """日线(近250根, k=5) + 周线(近104周, k=2, 含52周高低点)拐点聚类成关键位。
+    聚类容差0.6*ATR14；强度=触及次数+2*周线次数；只保留强度>=2的价位。"""
+    L = d.iloc[-1]
+    atr, price = float(L.atr14), float(L.close)
+    tol = 0.6 * atr
+    pts = []
+    ph, pl = _pivots(d.iloc[-250:], 5)
+    pts += [(x, 0) for x in ph + pl]
+    w = weekly_bars(d)
+    if len(w) >= 12:
+        wh, wl = _pivots(w.iloc[-104:], 2)
+        pts += [(x, 1) for x in wh + wl]
+        w52 = w.iloc[-52:]
+        pts += [(float(w52.high.max()), 1), (float(w52.low.min()), 1)]
+    pts.sort()
+    cl = []
+    for x, isw in pts:
+        if cl and x - cl[-1]["lo"] <= 2 * tol and x - cl[-1]["pts"][-1] <= tol:
+            c = cl[-1]
+            c["pts"].append(x); c["hi"] = x; c["w"] += isw
+        else:
+            cl.append(dict(pts=[x], lo=x, hi=x, w=isw))
+    levels = []
+    for c in cl:
+        n = len(c["pts"])
+        if n + 2 * c["w"] >= 2:
+            levels.append(dict(price=float(np.median(c["pts"])), lo=c["lo"], hi=c["hi"], touches=n, weekly=int(c["w"]),
+                               strength=n + 2 * int(c["w"])))
+    below = sorted([v for v in levels if v["price"] <= price - 0.2 * atr], key=lambda v: -v["price"])[:3]
+    above = sorted([v for v in levels if v["price"] >= price + 0.2 * atr], key=lambda v: v["price"])[:3]
+    return dict(support=below, resistance=above, all=levels, atr=atr, price=price)
+
+
+def sr_confluence(d, ev, sr):
+    """Spring/Test 的低点落在含周线的支撑簇内，或 SOS/LPS 突破的阻力与含周线的簇重合 → 多周期共振(+3 Wyckoff)。"""
+    atr = float(d.iloc[-1].atr14)
+    for k in ("Spring", "Test"):
+        if k in ev:
+            low = float(d.low[ev[k][0]])
+            if any(v["weekly"] and v["lo"] - 0.6 * atr <= low <= v["hi"] + 0.6 * atr for v in sr["all"]):
+                return f"{k}低点位于周线支撑区"
+    if "SOS" in ev or "LPS" in ev:
+        base = d.iloc[-45:-5]
+        res = float(base.high.max())
+        if any(v["weekly"] and v["lo"] - 0.6 * atr <= res <= v["hi"] + 0.6 * atr for v in sr["all"]):
+            return "突破位与周线压力区重合"
+    return None
+
+
+def rr_effective(plan):
+    """上方有强压力且距触发价不足1R时，R:R按不足2倍处理（只给3分）。"""
+    if plan is None:
+        return None
+    hr = plan.get("headroom_R")
+    return min(plan["rr"], 1.99) if (hr is not None and hr < 1.0) else plan["rr"]
 
 
 # ----------------------------------------------------------------- 交易计划
-def make_plan(d, ev, sup, res):
+def extension_penalty(d, ev, sup, res):
+    """追高/延伸度惩罚：评分是'事后'确认的，价格已大幅偏离均线或突破位时，信号应降级。
+    E = max(距EMA20的ATR数, 距突破位(SOS/LPS用阻力，Spring/Test用支撑)的ATR数)
+    E<=2 不罚；2<E<5 线性加罚；E>=5 罚20分；E>4 视为追高，不给可执行信号。"""
+    L = d.iloc[-1]
+    atr = L.atr14
+    ext_ema = float((L.close - L.ema20) / atr)
+    lvl = res if ("SOS" in ev or "LPS" in ev) else (sup if ("Spring" in ev or "Test" in ev) else None)
+    ext_lvl = float((L.close - lvl) / atr) if lvl is not None else 0.0
+    E = max(ext_ema, ext_lvl, 0.0)
+    pen = 0 if E <= 2 else min(20, int(round(20 * (E - 2) / 3)))
+    return dict(pen=pen, E=E, ext_ema=ext_ema, ext_lvl=ext_lvl,
+                run5=float(L.close / d.close.iloc[-6] - 1), chase=bool(E > 4))
+
+
+def grade_of(t):
+    return "A" if t >= 85 else "B" if t >= 70 else "C" if t >= 55 else "D"
+
+
+def make_plan(d, ev, sup, res, sr=None):
     L, atr = d.iloc[-1], d.iloc[-1].atr14
     entry = float(d.high.iloc[-3:].max() + 0.02 * atr)
     if "Spring" in ev: low = d.low[ev["Spring"][0]]
@@ -262,11 +374,20 @@ def make_plan(d, ev, sup, res):
     if risk <= 0 or stop >= float(d.close.iloc[-1]):  # 止损高于现价=已被触及，方案无效
         return None
     cands = [res, d.high.iloc[-60:].max(), d.high.iloc[-120:].max(), d.high.iloc[-252:].max(), L.sma50, L.sma200]
+    if sr:
+        cands += [v["price"] for v in sr["all"] if v["price"] > entry]
+    # 上方空间：触发价上方最近的强压力位（强度>=3，或含周线）到触发价的距离，以R计
+    head = None
+    if sr:
+        above = sorted([v for v in sr["all"] if v["price"] > entry + 0.1 * atr and (v["strength"] >= 3 or v["weekly"])],
+                       key=lambda v: v["price"])
+        head = above[0] if above else None
     # TP1 至少 1R；相邻 TP 至少相隔 0.5R；优先取上方结构位，不足再用 R 倍数补齐
     floor = entry + 1.0 * risk
+    reach = entry + 6.0 * atr   # 目标位上限：6ATR内才视为近期可达
     tp = []
     for x in sorted({round(float(x), 2) for x in cands if x == x}):
-        if x >= floor and (not tp or x >= tp[-1] + 0.5 * risk):
+        if floor <= x <= reach and (not tp or x >= tp[-1] + 0.5 * risk):
             tp.append(x)
         if len(tp) == 3:
             break
@@ -274,10 +395,11 @@ def make_plan(d, ev, sup, res):
         if len(tp) == 3:
             break
         lo = floor if not tp else tp[-1] + 0.5 * risk
-        tp.append(max(entry + m * risk, lo))
+        tp.append(max(min(entry + m * risk, reach), lo))
     R = [(x - entry) / risk for x in tp]
     return dict(entry=entry, stop=stop, risk=risk, risk_atr=risk / atr, tp=tp, R=R, rr=R[1],
-                wide_stop=risk / atr > 3.5)
+                wide_stop=risk / atr > 3.0,
+                headroom_R=((head["price"] - entry) / risk) if head else None, headroom_lvl=head)
 
 
 def hourly_check(h, entry):
@@ -303,15 +425,31 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
         return float(d.close.iloc[-1] / d.close.iloc[-1 - n] - 1 - (s.close.iloc[-1] / s.close.iloc[-1 - n] - 1))
     rsd = dict(rs1=rs(1), rs5=rs(5), rs20=rs(20))
     confirmed = [k for k in ("Spring", "Test", "SOS", "LPS") if k in ev]
-    plan = make_plan(d, ev, sup, res) if confirmed else None   # 无已确认事件不生成触发方案
-    rr = plan["rr"] if plan else None
+    sr = sr_levels(d)
+    plan = make_plan(d, ev, sup, res, sr) if confirmed else None   # 无已确认事件不生成触发方案
+    rr = rr_effective(plan)
     sc = score_all(d, ev, rsd, spy_pts, rr)
+    conf = sr_confluence(d, ev, sr) if confirmed else None
+    if conf:
+        delta = min(30, sc["wyckoff"] + 3) - sc["wyckoff"]
+        sc["wyckoff"] += delta
+        sc["total"] += delta
+    sc["confluence"] = conf
+    ext = extension_penalty(d, ev, sup, res)
+    sc["penalty"] = ext["pen"]
+    sc["total"] = max(0, sc["total"] - ext["pen"])
+    sc["grade"] = grade_of(sc["total"])
     hc = hourly_check(h, plan["entry"]) if plan else None
     miss = []
     if not confirmed: miss.append("日线无 Spring/Test/SOS/LPS 候选事件，不生成触发方案")
     elif plan is None: miss.append("无有效止损（止损≥入场或已高于现价）")
     elif plan["rr"] < MIN_RR: miss.append(f"预期R:R(TP2)={plan['rr']:.2f}<{MIN_RR:.0f}")
-    elif plan["wide_stop"]: miss.append(f"止损过宽({plan['risk_atr']:.1f}ATR)")
+    elif plan["wide_stop"]: miss.append(f"止损过宽({plan['risk_atr']:.1f}ATR>3)")
+    if plan is not None and plan.get("headroom_R") is not None and plan["headroom_R"] < 1.0:
+        hl = plan["headroom_lvl"]
+        miss.append(f"上方{hl['price']:.2f}（{'周线' if hl['weekly'] else '日线'}压力，触及{hl['touches']}次）距触发价仅{plan['headroom_R']:.1f}R，空间不足")
+    if ext["chase"] and confirmed:
+        miss.append(f"价格已过度延伸（距EMA20 {ext['ext_ema']:.1f}ATR，距突破/支撑位 {ext['ext_lvl']:.1f}ATR，近5日{ext['run5']:+.0%}），追高风险，等待缩量回踩确认")
     if sc["total"] < MIN_EXEC_SCORE: miss.append(f"评分{sc['total']}<{MIN_EXEC_SCORE}")
     if plan is not None:
         if hc is None: miss.append("1小时数据不足")
@@ -323,7 +461,7 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
                 ema20=float(L.ema20), sma50=float(L.sma50), sma200=float(L.sma200),
                 slopes=dict(ema20=float(L.ema20_slope), sma50=float(L.sma50_slope), sma200=float(L.sma200_slope)),
                 phase=phase_of(L, ev, sup), events={k: [str(v[0].date()), v[1]] for k, v in ev.items()},
-                rs=rsd, score=sc, plan=plan, hourly=hc, missing=miss, executable=execu,
+                rs=rsd, score=sc, extension=ext, sr=dict(support=sr["support"], resistance=sr["resistance"]), plan=plan, hourly=hc, missing=miss, executable=execu,
                 dist_to_entry=dist, xcheck=xc[1], data_warnings=warns)
 
 
@@ -376,10 +514,31 @@ def build_report(env, rows, failures, now, notes):
         L.append("- 事件证据（已收盘日线，候选而非定论）：" + (
             "；".join(f"{k}@{v[0]} {v[1]}" for k, v in r["events"].items()) or "无"))
         L.append(f"- 量能：RVOL20={r['rvol20']:.2f}；近20日上涨/下跌日均量比={sc['updown_vol_ratio']}")
-        L.append(f"- 评分：Wyckoff {sc['wyckoff']}/30 + 量能 {sc['volume']}/25 + 均线 {sc['ma']}/20 + SPY环境 {sc['env']}/15 + R:R {sc['rr']}/10 = **{sc['total']}（{sc['grade']}级）**")
+        L.append(f"- 评分：Wyckoff {sc['wyckoff']}/30 + 量能 {sc['volume']}/25 + 均线 {sc['ma']}/20 + SPY环境 {sc['env']}/15 + R:R {sc['rr']}/10 − 追高惩罚 {sc.get('penalty', 0)} = **{sc['total']}（{sc['grade']}级）**")
+        if sc.get("decay") or sc.get("ma_capped") or sc.get("confluence"):
+            notes = []
+            if sc.get("confluence"):
+                notes.append("多周期共振+3（" + sc["confluence"] + "）")
+            if sc.get("decay"):
+                notes.append("事件时效权重：" + "、".join(f"{k}×{v}" for k, v in sc["decay"].items()))
+            if sc.get("ma_capped"):
+                notes.append("均线分因价格延伸而封顶")
+            L.append("- 评分调整：" + "；".join(notes))
+        srr = r.get("sr")
+        if srr:
+            def _f(v):
+                tag = f"周×{v['weekly']}" if v["weekly"] else "日"
+                return f"{v['price']:.2f}（{tag}，触及{v['touches']}，{(v['price'] - r['price']) / r['atr14']:+.1f}ATR）"
+            sup_s = "、".join(_f(v) for v in srr["support"][:2]) or "无"
+            res_s = "、".join(_f(v) for v in srr["resistance"][:2]) or "无"
+            L.append(f"- 日/周线关键位：支撑 {sup_s}；压力 {res_s}")
+        ex = r.get("extension")
+        if ex:
+            L.append(f"- 延伸度：距EMA20 {ex['ext_ema']:.1f}ATR，距突破/支撑位 {ex['ext_lvl']:.1f}ATR，近5日{ex['run5']:+.1%}" + ("（过度延伸，禁止追高）" if ex["chase"] else ""))
         if pl:
             L.append(f"- 条件性方案（需先满足触发）：触发价 {pl['entry']:.2f}；技术止损 {pl['stop']:.2f}（风险{pl['risk_atr']:.1f}ATR）；"
-                     f"TP1/TP2/TP3 = {pl['tp'][0]:.2f}/{pl['tp'][1]:.2f}/{pl['tp'][2]:.2f}（{pl['R'][0]:.2f}R/{pl['R'][1]:.2f}R/{pl['R'][2]:.2f}R，预期R:R按TP2计）")
+                     f"TP1/TP2/TP3 = {pl['tp'][0]:.2f}/{pl['tp'][1]:.2f}/{pl['tp'][2]:.2f}（{pl['R'][0]:.2f}R/{pl['R'][1]:.2f}R/{pl['R'][2]:.2f}R，预期R:R按TP2计）"
+                     + (f"；上方最近强压力 {pl['headroom_lvl']['price']:.2f}（{pl['headroom_R']:.1f}R）" if pl.get("headroom_lvl") else ""))
         else:
             L.append("- 触发方案：未生成（无已确认的 Spring/Test/SOS/LPS 候选事件，或止损无效）")
         if hc:
@@ -551,13 +710,20 @@ def backtest(daily, spy, years=1.0, fill_window=5, max_hold=40, slip=0.0005):
             confirmed = [k for k in ("Spring", "Test", "SOS", "LPS") if k in ev]
             if not confirmed:
                 continue
-            plan = make_plan(ds, ev, sup, res)
+            sr = sr_levels(ds)
+            plan = make_plan(ds, ev, sup, res, sr)
             if not plan or plan["rr"] < MIN_RR or plan["wide_stop"]:
+                continue
+            if plan.get("headroom_R") is not None and plan["headroom_R"] < 1.0:
                 continue
             rsd = dict(rs5=cl[i] / cl[i - 5] - sclose[i] / sclose[i - 5],
                        rs20=cl[i] / cl[i - 20] - sclose[i] / sclose[i - 20])
-            sc = score_all(ds, ev, rsd, int(pts[i]), plan["rr"])
-            if sc["total"] < 55:
+            sc = score_all(ds, ev, rsd, int(pts[i]), rr_effective(plan))
+            if sr_confluence(ds, ev, sr):
+                sc["total"] += min(30, sc["wyckoff"] + 3) - sc["wyckoff"]
+            ext = extension_penalty(ds, ev, sup, res)
+            sc["total"] -= ext["pen"]
+            if ext["chase"] or sc["total"] < 55:
                 continue
             nsig += 1
             rec = dict(ticker=t, date=str(d.index[i].date()), score=sc["total"],
