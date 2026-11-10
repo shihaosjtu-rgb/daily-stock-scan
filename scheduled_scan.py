@@ -314,7 +314,9 @@ def sr_levels(d):
                                strength=n + 2 * int(c["w"])))
     below = sorted([v for v in levels if v["price"] <= price - 0.2 * atr], key=lambda v: -v["price"])[:3]
     above = sorted([v for v in levels if v["price"] >= price + 0.2 * atr], key=lambda v: v["price"])[:3]
-    return dict(support=below, resistance=above, all=levels, atr=atr, price=price)
+    # 近10日极值：最近的拐点还没被后续K线确认，不进入强度排序，但对止损/入场很关键，单独展示
+    recent = dict(low=float(d.low.iloc[-10:].min()), high=float(d.high.iloc[-10:].max()))
+    return dict(support=below, resistance=above, all=levels, atr=atr, price=price, recent=recent)
 
 
 def sr_confluence(d, ev, sr):
@@ -461,7 +463,7 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
                 ema20=float(L.ema20), sma50=float(L.sma50), sma200=float(L.sma200),
                 slopes=dict(ema20=float(L.ema20_slope), sma50=float(L.sma50_slope), sma200=float(L.sma200_slope)),
                 phase=phase_of(L, ev, sup), events={k: [str(v[0].date()), v[1]] for k, v in ev.items()},
-                rs=rsd, score=sc, extension=ext, sr=dict(support=sr["support"], resistance=sr["resistance"]), plan=plan, hourly=hc, missing=miss, executable=execu,
+                rs=rsd, score=sc, extension=ext, sr=dict(support=sr["support"], resistance=sr["resistance"], recent=sr["recent"]), plan=plan, hourly=hc, missing=miss, executable=execu,
                 dist_to_entry=dist, xcheck=xc[1], data_warnings=warns)
 
 
@@ -531,7 +533,12 @@ def build_report(env, rows, failures, now, notes):
                 return f"{v['price']:.2f}（{tag}，触及{v['touches']}，{(v['price'] - r['price']) / r['atr14']:+.1f}ATR）"
             sup_s = "、".join(_f(v) for v in srr["support"][:2]) or "无"
             res_s = "、".join(_f(v) for v in srr["resistance"][:2]) or "无"
-            L.append(f"- 日/周线关键位：支撑 {sup_s}；压力 {res_s}")
+            rc = srr.get("recent")
+            rc_s = ""
+            if rc:
+                rc_s = (f"；近10日极值（拐点未确认）：低 {rc['low']:.2f}（{(rc['low'] - r['price']) / r['atr14']:+.1f}ATR）"
+                        f" / 高 {rc['high']:.2f}（{(rc['high'] - r['price']) / r['atr14']:+.1f}ATR）")
+            L.append(f"- 日/周线关键位：支撑 {sup_s}；压力 {res_s}{rc_s}")
         ex = r.get("extension")
         if ex:
             L.append(f"- 延伸度：距EMA20 {ex['ext_ema']:.1f}ATR，距突破/支撑位 {ex['ext_lvl']:.1f}ATR，近5日{ex['run5']:+.1%}" + ("（过度延伸，禁止追高）" if ex["chase"] else ""))
