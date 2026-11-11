@@ -160,7 +160,7 @@ def pos_in_bar(b):
 
 
 # ----------------------------------------------------------------- Wyckoff 候选识别（规则化近似）
-def detect(d, sup, res):
+def detect(d, sup, res, levels=None):
     """仅基于已完成日线；结果均为'候选'，不证明机构行为。"""
     ev = {}
     win = d.iloc[-60:]
@@ -169,10 +169,19 @@ def detect(d, sup, res):
         if b.rvol20 >= 2 and ret[ts] <= -0.03 and pos_in_bar(b) >= 0.4:
             ev["SC?"] = (ts, f"RVOL20={b.rvol20:.1f}，单日{ret[ts]:.1%}，收于K线上部；单独出现不构成底部确认")
     last5 = d.iloc[-5:]
+    # 候选支撑：40日区间低点 + 日/周线强支撑(强度>=3)。后者要求刺破前一日收盘仍在支撑之上，
+    # 排除"价格早已跌破、只是反弹回到旧支撑"的假Spring。多个同时满足时，周线位优先。
+    pc = d.close.shift(1)
+    cand = [(sup, "区间", True)]
+    for v in sorted(levels or [], key=lambda v: (v["weekly"] > 0, v["price"])):
+        cand.append((v["price"], "周线" if v["weekly"] else "日线", False))
     for ts, b in last5.iterrows():
         atr = b.atr14
-        if b.low < sup and b.close > sup + 0.25 * atr:  # 收回须高于支撑至少0.25ATR，过滤贴线的弱收回
-            ev["Spring"] = (ts, f"最低{b.low:.2f}刺破支撑{sup:.2f}后收回，收{b.close:.2f}，RVOL20={b.rvol20:.2f}")
+        for S, tag, is_range in cand:
+            # 收回须高于支撑至少0.25ATR，过滤贴线的弱收回
+            if b.low < S and b.close > S + 0.25 * atr and (is_range or pc[ts] > S):
+                q = "缩量，质量较好" if b.rvol20 < 0.8 else ("量能正常" if b.rvol20 <= 1.2 else "放量，质量较低，需后续缩量测试确认")
+                ev["Spring"] = (ts, f"最低{b.low:.2f}刺破{tag}支撑{S:.2f}后收回，收{b.close:.2f}，RVOL20={b.rvol20:.2f}（{q}）", S)
     if "Spring" in ev:  # Spring 之后若有收盘跌破其最低点，视为失败而非吸筹
         sts = ev["Spring"][0]
         slow = float(d.low[sts])
@@ -180,11 +189,12 @@ def detect(d, sup, res):
         if len(fail):
             ev.pop("Spring")
             ev["Spring失败"] = (fail.index[0], f"收盘跌破Spring低点{slow:.2f}（{fail.index[0].date()}收{fail.close.iloc[0]:.2f}），吸筹假设作废")
+    S0 = ev["Spring"][2] if "Spring" in ev else sup
     for ts, b in last5.iterrows():
         atr = b.atr14
         if (("Spring" in ev and ts > ev["Spring"][0]) or ("SC?" in ev and "Spring" not in ev and ts > ev["SC?"][0])) \
-                and sup - 0.25 * atr <= b.low <= sup + 0.5 * atr and b.rvol20 < 0.8 and b.close > sup:
-            ev["Test"] = (ts, f"回测支撑附近(低{b.low:.2f})，缩量RVOL20={b.rvol20:.2f}，收回支撑之上")
+                and S0 - 0.25 * atr <= b.low <= S0 + 0.5 * atr and b.rvol20 < 0.8 and b.close > S0:
+            ev["Test"] = (ts, f"回测支撑{S0:.2f}附近(低{b.low:.2f})，缩量RVOL20={b.rvol20:.2f}，收回支撑之上", S0)
     for ts, b in last5.iterrows():
         if b.close > res and b.rvol20 >= 1.5 and pos_in_bar(b) >= 0.6 and b.close > b.ema20:
             ev["SOS"] = (ts, f"收盘{b.close:.2f}突破区间阻力{res:.2f}，RVOL20={b.rvol20:.2f}，收于K线上部")
@@ -199,7 +209,11 @@ def detect(d, sup, res):
 def phase_of(L, ev, sup=None):
     if "Spring失败" in ev and not any(k in ev for k in ("Test", "SOS", "LPS")):
         return "Spring失败（收盘跌破Spring低点），吸筹假设作废"
-    if sup is not None and L.close <= sup and ("Spring" in ev or "Test" in ev) and "SOS" not in ev:
+    ref = sup
+    for k in ("Spring", "Test"):
+        if k in ev and len(ev[k]) > 2:
+            ref = ev[k][2]
+    if ref is not None and L.close <= ref and ("Spring" in ev or "Test" in ev) and "SOS" not in ev:
         return "收盘仍在区间支撑下方（吸筹未确认）"
     if "SOS" in ev or "LPS" in ev:
         return "Phase D（候选）"
@@ -224,9 +238,15 @@ def score_all(d, ev, rs, spy_pts, rr):
     def _w(k):
         age = int(len(d) - 1 - d.index.get_loc(ev[k][0]))
         return DECAY[min(age, len(DECAY) - 1)]
+
+    def _q(k):  # Spring当天量能：缩量最好；放量说明下探时仍有供应，需后续缩量测试，分数打折
+        if k != "Spring":
+            return 1.0
+        rv = float(d.rvol20.loc[ev[k][0]])
+        return 1.0 if rv < 0.8 else 0.85 if rv <= 1.2 else 0.6 if rv <= 2.0 else 0.4
     # Wyckoff 30（无事件时仅给趋势基础分，最多8）
     pts = {"Spring": 8, "Test": 6, "SOS": 10, "LPS": 6}
-    wy = sum(v * _w(k) for k, v in pts.items() if k in ev)
+    wy = sum(v * _w(k) * _q(k) for k, v in pts.items() if k in ev)
     if wy == 0:
         wy = 8 if (L.close > L.sma200 and L.sma200_slope > 0) else (4 if L.close > L.sma50 else 0)
     wy = min(30, wy + (4 if ("SC?" in ev and wy >= 8) else 0))
@@ -258,7 +278,8 @@ def score_all(d, ev, rs, spy_pts, rr):
     grade = "A" if total >= 85 else "B" if total >= 70 else "C" if total >= 55 else "D"
     return dict(wyckoff=int(wy), volume=int(vol), ma=int(ma), env=int(env), rr=int(rrp), total=total,
                 grade=grade, updown_vol_ratio=None if np.isnan(ratio) else round(float(ratio), 2),
-                ma_capped=ma_capped, decay={k: round(_w(k), 2) for k in pts if k in ev})
+                ma_capped=ma_capped, decay={k: round(_w(k), 2) for k in pts if k in ev},
+                quality=({"Spring": round(_q("Spring"), 2)} if "Spring" in ev and _q("Spring") < 1 else {}))
 
 
 # ----------------------------------------------------------------- 日线/周线支撑压力
@@ -315,8 +336,10 @@ def sr_levels(d):
     below = sorted([v for v in levels if v["price"] <= price - 0.2 * atr], key=lambda v: -v["price"])[:3]
     above = sorted([v for v in levels if v["price"] >= price + 0.2 * atr], key=lambda v: v["price"])[:3]
     # 近10日极值：最近的拐点还没被后续K线确认，不进入强度排序，但对止损/入场很关键，单独展示
-    recent = dict(low=float(d.low.iloc[-10:].min()), high=float(d.high.iloc[-10:].max()))
-    return dict(support=below, resistance=above, all=levels, atr=atr, price=price, recent=recent)
+    recent = dict(low=float(d.low.iloc[-10:].min()))
+    # 现价±0.2ATR内的价位：既不算支撑也不算压力，但价格正压在上面，必须单独列出
+    at = sorted([v for v in levels if abs(v["price"] - price) < 0.2 * atr], key=lambda v: abs(v["price"] - price))[:2]
+    return dict(support=below, resistance=above, all=levels, atr=atr, price=price, recent=recent, at=at)
 
 
 def sr_confluence(d, ev, sr):
@@ -351,7 +374,11 @@ def extension_penalty(d, ev, sup, res):
     L = d.iloc[-1]
     atr = L.atr14
     ext_ema = float((L.close - L.ema20) / atr)
-    lvl = res if ("SOS" in ev or "LPS" in ev) else (sup if ("Spring" in ev or "Test" in ev) else None)
+    sup_ref = sup
+    for k in ("Spring", "Test"):
+        if k in ev and len(ev[k]) > 2:
+            sup_ref = ev[k][2]
+    lvl = res if ("SOS" in ev or "LPS" in ev) else (sup_ref if ("Spring" in ev or "Test" in ev) else None)
     ext_lvl = float((L.close - lvl) / atr) if lvl is not None else 0.0
     E = max(ext_ema, ext_lvl, 0.0)
     pen = 0 if E <= 2 else min(20, int(round(20 * (E - 2) / 3)))
@@ -420,14 +447,14 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
     L, P = d.iloc[-1], d.iloc[-2]
     base = d.iloc[-45:-5]
     sup, res = float(base.low.min()), float(base.high.max())
-    ev = detect(d, sup, res)
+    sr = sr_levels(d)
+    ev = detect(d, sup, res, [v for v in sr["all"] if v["strength"] >= 3])
     s = spy.reindex(d.index).ffill()
 
     def rs(n):
         return float(d.close.iloc[-1] / d.close.iloc[-1 - n] - 1 - (s.close.iloc[-1] / s.close.iloc[-1 - n] - 1))
     rsd = dict(rs1=rs(1), rs5=rs(5), rs20=rs(20))
     confirmed = [k for k in ("Spring", "Test", "SOS", "LPS") if k in ev]
-    sr = sr_levels(d)
     plan = make_plan(d, ev, sup, res, sr) if confirmed else None   # 无已确认事件不生成触发方案
     rr = rr_effective(plan)
     sc = score_all(d, ev, rsd, spy_pts, rr)
@@ -463,7 +490,7 @@ def analyze(t, d, h, spy, spy_pts, xc, warns):
                 ema20=float(L.ema20), sma50=float(L.sma50), sma200=float(L.sma200),
                 slopes=dict(ema20=float(L.ema20_slope), sma50=float(L.sma50_slope), sma200=float(L.sma200_slope)),
                 phase=phase_of(L, ev, sup), events={k: [str(v[0].date()), v[1]] for k, v in ev.items()},
-                rs=rsd, score=sc, extension=ext, sr=dict(support=sr["support"], resistance=sr["resistance"], recent=sr["recent"]), plan=plan, hourly=hc, missing=miss, executable=execu,
+                rs=rsd, score=sc, extension=ext, sr=dict(support=sr["support"], resistance=sr["resistance"], recent=sr["recent"], at=sr["at"]), plan=plan, hourly=hc, missing=miss, executable=execu,
                 dist_to_entry=dist, xcheck=xc[1], data_warnings=warns)
 
 
@@ -517,12 +544,14 @@ def build_report(env, rows, failures, now, notes):
             "；".join(f"{k}@{v[0]} {v[1]}" for k, v in r["events"].items()) or "无"))
         L.append(f"- 量能：RVOL20={r['rvol20']:.2f}；近20日上涨/下跌日均量比={sc['updown_vol_ratio']}")
         L.append(f"- 评分：Wyckoff {sc['wyckoff']}/30 + 量能 {sc['volume']}/25 + 均线 {sc['ma']}/20 + SPY环境 {sc['env']}/15 + R:R {sc['rr']}/10 − 追高惩罚 {sc.get('penalty', 0)} = **{sc['total']}（{sc['grade']}级）**")
-        if sc.get("decay") or sc.get("ma_capped") or sc.get("confluence"):
+        if sc.get("decay") or sc.get("ma_capped") or sc.get("confluence") or sc.get("quality"):
             notes = []
             if sc.get("confluence"):
                 notes.append("多周期共振+3（" + sc["confluence"] + "）")
             if sc.get("decay"):
                 notes.append("事件时效权重：" + "、".join(f"{k}×{v}" for k, v in sc["decay"].items()))
+            if sc.get("quality"):
+                notes.append(f"Spring放量，质量折扣×{sc['quality']['Spring']}")
             if sc.get("ma_capped"):
                 notes.append("均线分因价格延伸而封顶")
             L.append("- 评分调整：" + "；".join(notes))
@@ -536,9 +565,11 @@ def build_report(env, rows, failures, now, notes):
             rc = srr.get("recent")
             rc_s = ""
             if rc:
-                rc_s = (f"；近10日极值（拐点未确认）：低 {rc['low']:.2f}（{(rc['low'] - r['price']) / r['atr14']:+.1f}ATR）"
-                        f" / 高 {rc['high']:.2f}（{(rc['high'] - r['price']) / r['atr14']:+.1f}ATR）")
-            L.append(f"- 日/周线关键位：支撑 {sup_s}；压力 {res_s}{rc_s}")
+                rc_s = f"；近10日低点（拐点未确认）：{rc['low']:.2f}（{(rc['low'] - r['price']) / r['atr14']:+.1f}ATR）"
+            at_s = ""
+            if srr.get("at"):
+                at_s = "；**现价正处于**：" + "、".join(_f(v) for v in srr["at"])
+            L.append(f"- 日/周线关键位：支撑 {sup_s}；压力 {res_s}{at_s}{rc_s}")
         ex = r.get("extension")
         if ex:
             L.append(f"- 延伸度：距EMA20 {ex['ext_ema']:.1f}ATR，距突破/支撑位 {ex['ext_lvl']:.1f}ATR，近5日{ex['run5']:+.1%}" + ("（过度延伸，禁止追高）" if ex["chase"] else ""))
@@ -713,11 +744,11 @@ def backtest(daily, spy, years=1.0, fill_window=5, max_hold=40, slip=0.0005):
             ds = d.iloc[:i + 1]
             base = ds.iloc[-45:-5]
             sup, res = float(base.low.min()), float(base.high.max())
-            ev = detect(ds, sup, res)
+            sr = sr_levels(ds)
+            ev = detect(ds, sup, res, [v for v in sr["all"] if v["strength"] >= 3])
             confirmed = [k for k in ("Spring", "Test", "SOS", "LPS") if k in ev]
             if not confirmed:
                 continue
-            sr = sr_levels(ds)
             plan = make_plan(ds, ev, sup, res, sr)
             if not plan or plan["rr"] < MIN_RR or plan["wide_stop"]:
                 continue
