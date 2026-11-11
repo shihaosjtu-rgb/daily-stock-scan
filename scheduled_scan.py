@@ -27,7 +27,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-TICKERS = ["COIN", "NVDA", "GOOGL", "AVGO", "MU", "APP", "FIG", "SOFI", "ASML", "NBIS", "VST"]
+TICKERS = ["COIN", "NVDA", "GOOGL", "AVGO", "MU", "APP", "FIG", "SOFI", "ASML", "NBIS", "VST",
+           "SNDK", "WDC", "ORCL", "IBM", "AMZN"]
 BENCH = "SPY"
 NY, JST = ZoneInfo("America/New_York"), ZoneInfo("Asia/Tokyo")
 OUT = Path(os.environ.get("SCAN_OUT", "reports"))
