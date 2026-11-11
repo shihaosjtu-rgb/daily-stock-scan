@@ -18,7 +18,7 @@
 
 研究与技术分析工具，不构成投资建议。
 """
-import argparse, io, json, os, smtplib, ssl, sys, time, traceback
+import argparse, io, json, logging, os, smtplib, ssl, sys, time, traceback
 import datetime as dt
 from email.message import EmailMessage
 from pathlib import Path
@@ -528,6 +528,8 @@ def build_report(env, rows, failures, now, notes):
     for r in rows:
         ev = "、".join(k for k in r["events"]) or "无"
         st = "**可执行**" if r["executable"] else ("观察（非买入）" if r["score"]["total"] >= WATCH_SCORE else "无信号")
+        if r.get("sync_bad"):
+            st = "数据不同步"
         L.append(f"| {r['ticker']} | {r['price']:.2f}（{r['asof']}） | {pct(r['chg1'])} | {r['phase']} | {ev} | "
                  f"{r['rvol20']:.2f} | {pct(r['rs']['rs5'])}/{pct(r['rs']['rs20'])} | "
                  f"{r['score']['total']}（{r['score']['grade']}） | {st} |")
@@ -648,6 +650,18 @@ def deliver(full, now):
 
 
 # ----------------------------------------------------------------- 主流程
+def _daily_lag(raw_d, now):
+    """SPY日线最新一根落后于'应有的最近已完成交易日'几天（>=1表示Yahoo日线还没更新，或休市）。"""
+    if BENCH not in raw_d:
+        return 0
+    d = completed_daily(raw_d[BENCH], now)
+    if d is None or d.empty:
+        return 0
+    after_close = (now.hour, now.minute) >= (16, 10)
+    exp = last_weekday(now.date() if after_close else now.date() - dt.timedelta(days=1))
+    return (exp - d.index[-1].date()).days
+
+
 def run(now=None, fetcher=fetch, earnings=True):
     now = now or dt.datetime.now(NY)
     names = TICKERS + [BENCH]
@@ -655,6 +669,16 @@ def run(now=None, fetcher=fetch, earnings=True):
     try:
         raw_d = fetcher(names, "1d", "2y")
         raw_h = fetcher(names, "1h", "60d")
+        # Yahoo日线有时比1小时线晚更新：发现滞后就等一等、重拉，避免用旧日线配新1小时线
+        retries = int(os.environ.get("SCAN_STALE_RETRIES", 2))
+        wait = int(os.environ.get("SCAN_STALE_WAIT", 120))
+        for _ in range(retries):
+            if _daily_lag(raw_d, now) < 1:
+                break
+            logging.warning("日线滞后，%d秒后重新下载", wait)
+            time.sleep(wait)
+            raw_d = fetcher(names, "1d", "2y")
+            raw_h = fetcher(names, "1h", "60d")
     except Exception as e:
         full = build_report(None, [], {t: f"数据下载失败 {type(e).__name__}" for t in TICKERS}, now,
                             [f"行情下载失败：{e}"])
@@ -676,6 +700,7 @@ def run(now=None, fetcher=fetch, earnings=True):
         D[t] = (d, crit, warn)
         H[t] = (h if not hcrit else None, hwarn + [f"1小时数据未用：{'; '.join(hcrit)}"] * bool(hcrit))
     env = None
+    sync_bad = []
     sd, scrit, swarn = D[BENCH]
     if not scrit:
         env = spy_env(sd)
@@ -689,9 +714,19 @@ def run(now=None, fetcher=fetch, earnings=True):
         try:
             r = analyze(t, d, H[t][0], sd, env["pts"], xc, warn + H[t][1])
             r["earnings"] = next_earnings(t) if earnings else None
+            hh = H[t][0]
+            if hh is not None and len(hh) and hh.index[-1].date() > d.index[-1].date():
+                # 1小时线已到新的一天而日线还停在前一天：日线结论基于旧数据，不能给可执行信号
+                r["executable"] = False
+                r["sync_bad"] = True
+                r["missing"].insert(0, f"日线({d.index[-1].date()})落后于1小时线({hh.index[-1].date()})，数据不同步，暂不判断")
+                sync_bad.append(t)
             rows.append(r)
         except Exception as e:
             failures[t] = f"分析异常 {type(e).__name__}: {e}"
+    if sync_bad:
+        notes.insert(0, "⚠ 日线数据落后于1小时线（Yahoo日线尚未更新）：" + "、".join(sync_bad)
+                     + "。这些标的的日线结论基于旧数据，已禁止给出可执行信号，请稍后重跑。")
     full = build_report(env, rows, failures, now, notes)
     deliver(full, now)
     (OUT / f"{now.strftime('%Y-%m-%d')}.json").write_text(
@@ -946,6 +981,7 @@ def selftest():
         return out
     global OUT
     OUT = Path("selftest_reports")
+    os.environ["SCAN_STALE_RETRIES"] = "0"
     rep = run(now=now, fetcher=fake, earnings=False)
     assert "每日美股扫描" in rep and "NVDA" in rep
     print("\nSELFTEST OK")
