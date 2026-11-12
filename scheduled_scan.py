@@ -37,9 +37,9 @@ MIN_EXEC_SCORE = 70   # 可执行信号最低分（B级及以上）
 WATCH_SCORE = 55      # 观察名单下限（C级）：仅观察，不是买入信号
 MIN_RR = 2.0          # 以 TP2 计的预期风险收益比下限
 MIN_DAILY, MIN_HOURLY = 210, 60
-# 宏观共振监测：纳斯达克100、美元指数收在200日均线上方，且VIX出现恐慌
+# 宏观共振监测：纳斯达克100收在200日均线上方、美元指数收在200日均线下方，且VIX出现恐慌
 MACRO = {"NDX": ("^NDX", "纳斯达克100"), "DXY": ("DX-Y.NYB", "美元指数"), "VIX": ("^VIX", "VIX")}
-VIX_PANIC = 28.0        # VIX收盘不低于28，视为恐慌
+VIX_PANIC = 30.0        # VIX收盘不低于30，视为恐慌
 VIX_ALERT = 25.0        # 或：VIX收盘不低于25，且不低于其20日均线的 VIX_SPIKE_MULT 倍（急升）
 VIX_SPIKE_MULT = 1.4
 
@@ -545,7 +545,7 @@ def macro_monitor(raw, now):
         return res
     ndx, dxy, vix = closes["NDX"], closes["DXY"], closes["VIX"]
     ndx_ma, dxy_ma, vix_ma20 = ndx.rolling(200).mean(), dxy.rolling(200).mean(), vix.rolling(20).mean()
-    flags = pd.concat([(ndx > ndx_ma).rename("ndx"), (dxy > dxy_ma).rename("dxy"),
+    flags = pd.concat([(ndx > ndx_ma).rename("ndx"), (dxy < dxy_ma).rename("dxy"),
                        ((vix >= VIX_PANIC) | ((vix >= VIX_ALERT) & (vix >= VIX_SPIKE_MULT * vix_ma20))).rename("vix")],
                       axis=1, join="inner").dropna()
     all3 = flags.all(axis=1)
@@ -561,7 +561,7 @@ def macro_monitor(raw, now):
     res.update(
         ok=True,
         ndx=dict(close=float(ndx.iloc[-1]), ma=float(ndx_ma.iloc[-1]), date=str(ndx.index[-1].date()), flag=bool(ndx.iloc[-1] > ndx_ma.iloc[-1])),
-        dxy=dict(close=float(dxy.iloc[-1]), ma=float(dxy_ma.iloc[-1]), date=str(dxy.index[-1].date()), flag=bool(dxy.iloc[-1] > dxy_ma.iloc[-1])),
+        dxy=dict(close=float(dxy.iloc[-1]), ma=float(dxy_ma.iloc[-1]), date=str(dxy.index[-1].date()), flag=bool(dxy.iloc[-1] < dxy_ma.iloc[-1])),
         vix=dict(close=float(vix.iloc[-1]), ma20=float(vix_ma20.iloc[-1]), date=str(vix.index[-1].date()),
                  chg1=float(vix.iloc[-1] / vix.iloc[-2] - 1), flag=bool(flags["vix"].iloc[-1])),
         count=int(flags.iloc[-1].sum()), resonance=bool(vals[-1]), streak=streak,
@@ -579,7 +579,7 @@ def macro_block(m):
     mk = lambda f: "✅" if f else "❌"
     L += ["", "| 条件 | 最新收盘（日期） | 参照 | 满足 |", "|---|---|---|---|",
           f"| 纳斯达克100 收在200日均线上方 | {a['close']:.2f}（{a['date']}） | 200日均线 {a['ma']:.2f}（{(a['close'] / a['ma'] - 1):+.2%}） | {mk(a['flag'])} |",
-          f"| 美元指数 收在200日均线上方 | {b['close']:.2f}（{b['date']}） | 200日均线 {b['ma']:.2f}（{(b['close'] / b['ma'] - 1):+.2%}） | {mk(b['flag'])} |",
+          f"| 美元指数 收在200日均线下方 | {b['close']:.2f}（{b['date']}） | 200日均线 {b['ma']:.2f}（{(b['close'] / b['ma'] - 1):+.2%}） | {mk(b['flag'])} |",
           f"| VIX 恐慌（≥{VIX_PANIC:.0f}，或≥{VIX_ALERT:.0f}且≥20日均线×{VIX_SPIKE_MULT}） | {v['close']:.2f}（{v['date']}，日{pct(v['chg1'])}） | 20日均线 {v['ma20']:.2f} | {mk(v['flag'])} |", ""]
     if m["resonance"]:
         L.append(f"**三者共振：已触发**（连续 {m['streak']} 个交易日）。")
