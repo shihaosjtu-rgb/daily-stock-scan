@@ -27,7 +27,7 @@
    "close": 102.91000366210938,
    "ma": 99.78370021820068,
    "date": "2026-11-11",
-   "flag": true
+   "flag": false
   },
   "vix": {
    "close": 17.489999771118164,
@@ -36,11 +36,11 @@
    "chg1": -0.10123326855273984,
    "flag": false
   },
-  "count": 2,
+  "count": 1,
   "resonance": false,
   "streak": 0,
-  "last_prior": "2026-03-06",
-  "cnt252": 1
+  "last_prior": "2025-10-16",
+  "cnt252": 0
  },
  "rows": [
   {
