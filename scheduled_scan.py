@@ -196,14 +196,25 @@ def detect(d, sup, res, levels=None):
         if (("Spring" in ev and ts > ev["Spring"][0]) or ("SC?" in ev and "Spring" not in ev and ts > ev["SC?"][0])) \
                 and S0 - 0.25 * atr <= b.low <= S0 + 0.5 * atr and b.rvol20 < 0.8 and b.close > S0:
             ev["Test"] = (ts, f"回测支撑{S0:.2f}附近(低{b.low:.2f})，缩量RVOL20={b.rvol20:.2f}，收回支撑之上", S0)
+    # SOS：放量、收于K线上部、站上EMA20，且收盘突破 ①40日区间高点，或 ②日/周线强压力位。
+    # ②要求突破当天的前一日收盘仍在压力位下方（真正的"突破日"），并且高出至少0.1ATR；多个同时满足时周线位优先。
+    res_cand = [(res, "区间", True)]
+    for v in sorted(levels or [], key=lambda v: (v["weekly"] > 0, v["price"])):
+        res_cand.append((v["price"], "周线" if v["weekly"] else "日线", False))
     for ts, b in last5.iterrows():
-        if b.close > res and b.rvol20 >= 1.5 and pos_in_bar(b) >= 0.6 and b.close > b.ema20:
-            ev["SOS"] = (ts, f"收盘{b.close:.2f}突破区间阻力{res:.2f}，RVOL20={b.rvol20:.2f}，收于K线上部")
+        if not (b.rvol20 >= 1.5 and pos_in_bar(b) >= 0.6 and b.close > b.ema20):
+            continue
+        for R, tag, is_range in res_cand:
+            ok = (b.close > R) if is_range else (b.close > R + 0.1 * b.atr14 and pc[ts] <= R)
+            if ok:
+                label = "区间阻力" if is_range else f"{tag}压力"
+                ev["SOS"] = (ts, f"收盘{b.close:.2f}突破{label}{R:.2f}，RVOL20={b.rvol20:.2f}，收于K线上部", R)
     if "SOS" in ev:
+        R0 = ev["SOS"][2]
         for ts, b in last5.iterrows():
-            if ts > ev["SOS"][0] and res - b.atr14 <= b.low <= res + 0.5 * b.atr14 \
-                    and b.rvol20 < 0.9 and b.close >= res - 0.25 * b.atr14:
-                ev["LPS"] = (ts, f"突破后回踩阻力转支撑({res:.2f})，缩量RVOL20={b.rvol20:.2f}，未失守")
+            if ts > ev["SOS"][0] and R0 - b.atr14 <= b.low <= R0 + 0.5 * b.atr14 \
+                    and b.rvol20 < 0.9 and b.close >= R0 - 0.25 * b.atr14:
+                ev["LPS"] = (ts, f"突破后回踩阻力转支撑({R0:.2f})，缩量RVOL20={b.rvol20:.2f}，未失守", R0)
     return ev
 
 
@@ -353,7 +364,7 @@ def sr_confluence(d, ev, sr):
                 return f"{k}低点位于周线支撑区"
     if "SOS" in ev or "LPS" in ev:
         base = d.iloc[-45:-5]
-        res = float(base.high.max())
+        res = ev["SOS"][2] if ("SOS" in ev and len(ev["SOS"]) > 2) else float(base.high.max())
         if any(v["weekly"] and v["lo"] - 0.6 * atr <= res <= v["hi"] + 0.6 * atr for v in sr["all"]):
             return "突破位与周线压力区重合"
     return None
@@ -379,7 +390,8 @@ def extension_penalty(d, ev, sup, res):
     for k in ("Spring", "Test"):
         if k in ev and len(ev[k]) > 2:
             sup_ref = ev[k][2]
-    lvl = res if ("SOS" in ev or "LPS" in ev) else (sup_ref if ("Spring" in ev or "Test" in ev) else None)
+    res_ref = ev["SOS"][2] if ("SOS" in ev and len(ev["SOS"]) > 2) else res
+    lvl = res_ref if ("SOS" in ev or "LPS" in ev) else (sup_ref if ("Spring" in ev or "Test" in ev) else None)
     ext_lvl = float((L.close - lvl) / atr) if lvl is not None else 0.0
     E = max(ext_ema, ext_lvl, 0.0)
     pen = 0 if E <= 2 else min(20, int(round(20 * (E - 2) / 3)))
