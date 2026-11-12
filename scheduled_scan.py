@@ -37,6 +37,11 @@ MIN_EXEC_SCORE = 70   # 可执行信号最低分（B级及以上）
 WATCH_SCORE = 55      # 观察名单下限（C级）：仅观察，不是买入信号
 MIN_RR = 2.0          # 以 TP2 计的预期风险收益比下限
 MIN_DAILY, MIN_HOURLY = 210, 60
+# 宏观共振监测：纳斯达克100、美元指数收在200日均线上方，且VIX出现恐慌
+MACRO = {"NDX": ("^NDX", "纳斯达克100"), "DXY": ("DX-Y.NYB", "美元指数"), "VIX": ("^VIX", "VIX")}
+VIX_PANIC = 28.0        # VIX收盘不低于28，视为恐慌
+VIX_ALERT = 25.0        # 或：VIX收盘不低于25，且不低于其20日均线的 VIX_SPIKE_MULT 倍（急升）
+VIX_SPIKE_MULT = 1.4
 
 
 # ----------------------------------------------------------------- 数据获取
@@ -522,7 +527,70 @@ def spy_env(spy):
 def pct(x): return f"{x:+.2%}"
 
 
-def build_report(env, rows, failures, now, notes):
+# ----------------------------------------------------------------- 宏观共振监测（只作背景提示，不改变个股评分与信号）
+def macro_monitor(raw, now):
+    res = dict(ok=False, missing=[])
+    closes = {}
+    for k, (t, name) in MACRO.items():
+        df = raw.get(t) if raw else None
+        if df is None or len(df) == 0:
+            res["missing"].append(name)
+            continue
+        d = completed_daily(df, now)
+        if len(d) < 205 or d.close.isna().any():
+            res["missing"].append(f"{name}(样本不足或有缺失)")
+            continue
+        closes[k] = d.close.astype(float)
+    if res["missing"]:
+        return res
+    ndx, dxy, vix = closes["NDX"], closes["DXY"], closes["VIX"]
+    ndx_ma, dxy_ma, vix_ma20 = ndx.rolling(200).mean(), dxy.rolling(200).mean(), vix.rolling(20).mean()
+    flags = pd.concat([(ndx > ndx_ma).rename("ndx"), (dxy > dxy_ma).rename("dxy"),
+                       ((vix >= VIX_PANIC) | ((vix >= VIX_ALERT) & (vix >= VIX_SPIKE_MULT * vix_ma20))).rename("vix")],
+                      axis=1, join="inner").dropna()
+    all3 = flags.all(axis=1)
+    vals = all3.values
+    n = len(vals)
+    streak = 0
+    for v in vals[::-1]:
+        if v:
+            streak += 1
+        else:
+            break
+    prior = [i for i in range(n - streak) if vals[i]]
+    res.update(
+        ok=True,
+        ndx=dict(close=float(ndx.iloc[-1]), ma=float(ndx_ma.iloc[-1]), date=str(ndx.index[-1].date()), flag=bool(ndx.iloc[-1] > ndx_ma.iloc[-1])),
+        dxy=dict(close=float(dxy.iloc[-1]), ma=float(dxy_ma.iloc[-1]), date=str(dxy.index[-1].date()), flag=bool(dxy.iloc[-1] > dxy_ma.iloc[-1])),
+        vix=dict(close=float(vix.iloc[-1]), ma20=float(vix_ma20.iloc[-1]), date=str(vix.index[-1].date()),
+                 chg1=float(vix.iloc[-1] / vix.iloc[-2] - 1), flag=bool(flags["vix"].iloc[-1])),
+        count=int(flags.iloc[-1].sum()), resonance=bool(vals[-1]), streak=streak,
+        last_prior=str(flags.index[prior[-1]].date()) if prior else None,
+        cnt252=int(all3.iloc[-252:].sum()))
+    return res
+
+
+def macro_block(m):
+    L = ["", "## 一·B、宏观共振监测（纳斯达克100 / 美元指数 / VIX）"]
+    if not m or not m.get("ok"):
+        miss = "、".join(m.get("missing", [])) if m else "下载失败"
+        return L + [f"数据缺失，本次无法判断：{miss}。"]
+    a, b, v = m["ndx"], m["dxy"], m["vix"]
+    mk = lambda f: "✅" if f else "❌"
+    L += ["", "| 条件 | 最新收盘（日期） | 参照 | 满足 |", "|---|---|---|---|",
+          f"| 纳斯达克100 收在200日均线上方 | {a['close']:.2f}（{a['date']}） | 200日均线 {a['ma']:.2f}（{(a['close'] / a['ma'] - 1):+.2%}） | {mk(a['flag'])} |",
+          f"| 美元指数 收在200日均线上方 | {b['close']:.2f}（{b['date']}） | 200日均线 {b['ma']:.2f}（{(b['close'] / b['ma'] - 1):+.2%}） | {mk(b['flag'])} |",
+          f"| VIX 恐慌（≥{VIX_PANIC:.0f}，或≥{VIX_ALERT:.0f}且≥20日均线×{VIX_SPIKE_MULT}） | {v['close']:.2f}（{v['date']}，日{pct(v['chg1'])}） | 20日均线 {v['ma20']:.2f} | {mk(v['flag'])} |", ""]
+    if m["resonance"]:
+        L.append(f"**三者共振：已触发**（连续 {m['streak']} 个交易日）。")
+    else:
+        L.append(f"**三者共振：未触发**（满足 {m['count']}/3）。")
+    L.append(f"近一年共振出现 {m['cnt252']} 个交易日；" + (f"最近一次在 {m['last_prior']}。" if m["last_prior"] else "更早的历史里没有出现过。"))
+    L.append("*仅作为宏观背景提示，不改变个股评分和信号规则；VIX 的恐慌阈值是我设的初始值，可在文件顶部调整。*")
+    return L
+
+
+def build_report(env, rows, failures, now, notes, macro=None):
     jst = now.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
     L = [f"# 每日美股扫描（做多）— 运行 {now.strftime('%Y-%m-%d %H:%M ET')} / {jst}",
          "数据源：**仅 Yahoo 单一来源**（yfinance），日线+1小时，已剔除未收盘K线；未做跨源核验，关键价位请对照券商行情确认。", ""]
@@ -535,6 +603,7 @@ def build_report(env, rows, failures, now, notes):
                  f"位于 {'、'.join(env['above']) or '全部关键均线下方'} 之上。环境评分 {env['pts']}/11 → **{env['label']}**。")
     else:
         L.append("SPY 数据缺失或未通过校验，环境无法判断，所有标的不给可执行信号。")
+    L += macro_block(macro)
     L += ["", f"## 二、{len(TICKERS)}只股票对比", "",
           "| 标的 | 收盘/日期 | 日涨跌 | 趋势/阶段 | 事件 | RVOL20 | 相对SPY(5d/20d) | 评分/等级 | 状态 |",
           "|---|---|---|---|---|---|---|---|---|"]
@@ -740,10 +809,15 @@ def run(now=None, fetcher=fetch, earnings=True):
     if sync_bad:
         notes.insert(0, "⚠ 日线数据落后于1小时线（Yahoo日线尚未更新）：" + "、".join(sync_bad)
                      + "。这些标的的日线结论基于旧数据，已禁止给出可执行信号，请稍后重跑。")
-    full = build_report(env, rows, failures, now, notes)
+    macro = None
+    try:
+        macro = macro_monitor(fetcher(list(t for t, _ in MACRO.values()), "1d", "2y"), now)
+    except Exception as e:
+        notes.append(f"宏观共振监测失败：{type(e).__name__}")
+    full = build_report(env, rows, failures, now, notes, macro)
     deliver(full, now)
     (OUT / f"{now.strftime('%Y-%m-%d')}.json").write_text(
-        json.dumps(dict(env=env, rows=rows, failures=failures), ensure_ascii=False, default=str, indent=1), encoding="utf-8")
+        json.dumps(dict(env=env, macro=macro, rows=rows, failures=failures), ensure_ascii=False, default=str, indent=1), encoding="utf-8")
     return full
 
 
