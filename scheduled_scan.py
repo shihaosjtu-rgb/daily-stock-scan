@@ -411,11 +411,15 @@ def grade_of(t):
 def make_plan(d, ev, sup, res, sr=None):
     L, atr = d.iloc[-1], d.iloc[-1].atr14
     entry = float(d.high.iloc[-3:].max() + 0.02 * atr)
-    if "Spring" in ev: low = d.low[ev["Spring"][0]]
-    elif "Test" in ev: low = d.low[ev["Test"][0]]
-    elif "LPS" in ev: low = d.low[ev["LPS"][0]]
-    elif "SOS" in ev: low = d.low[ev["SOS"][0]]
-    else: low = d.low.iloc[-5:].min()
+    # 止损以"最近一次"已确认事件的低点为准（同日时 LPS>SOS>Test>Spring）：
+    # 例如Spring后几天又出现SOS，入场依据是突破，失效位应在突破K线低点，而不是几天前更深的Spring低点。
+    order = {"LPS": 0, "SOS": 1, "Test": 2, "Spring": 3}
+    evs = [k for k in order if k in ev]
+    if evs:
+        k0 = sorted(evs, key=lambda k: (-ev[k][0].value, order[k]))[0]
+        low = d.low[ev[k0][0]]
+    else:
+        low = d.low.iloc[-5:].min()
     stop = float(low - 0.5 * atr)
     risk = entry - stop
     if risk <= 0 or stop >= float(d.close.iloc[-1]):  # 止损高于现价=已被触及，方案无效
