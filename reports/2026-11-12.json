@@ -23,8 +23,8 @@
    "flag": true
   },
   "dxy": {
-   "close": 103.16200256347656,
-   "ma": 99.81726024627686,
+   "close": 103.16999816894531,
+   "ma": 99.8173002243042,
    "date": "2026-11-12",
    "flag": false
   },
@@ -36,6 +36,19 @@
    "flag": false
   },
   "count": 1,
+  "strict": {
+   "on": false,
+   "streak": 0,
+   "cnt252": 0,
+   "last_prior": "2025-10-16"
+  },
+  "relaxed": {
+   "on": false,
+   "streak": 0,
+   "cnt252": 0,
+   "last_prior": "2025-10-20"
+  },
+  "panic_days": [],
   "resonance": false,
   "streak": 0,
   "last_prior": "2025-10-16",
@@ -175,8 +188,8 @@
    },
    "hourly": {
     "time": "11-12 15:30 ET",
-    "close": 130.63999938964844,
-    "rvol": 0.7271154839469702,
+    "close": 130.6199951171875,
+    "rvol": 0.8008153050157061,
     "triggered": false
    },
    "missing": [
@@ -337,7 +350,7 @@
    "hourly": {
     "time": "11-12 15:30 ET",
     "close": 166.0399932861328,
-    "rvol": 0.08645969136565447,
+    "rvol": 1.7091323222527968,
     "triggered": false
    },
    "missing": [
@@ -623,7 +636,7 @@
    "hourly": {
     "time": "11-12 15:30 ET",
     "close": 364.3800048828125,
-    "rvol": 0.49064357215122867,
+    "rvol": 0.703436839614408,
     "triggered": false
    },
    "missing": [
@@ -897,7 +910,7 @@
    "hourly": {
     "time": "11-12 15:30 ET",
     "close": 393.7099914550781,
-    "rvol": 0.898246022959035,
+    "rvol": 0.8982423992767171,
     "triggered": false
    },
    "missing": [
@@ -1046,7 +1059,7 @@
    "hourly": {
     "time": "11-12 15:30 ET",
     "close": 18.920000076293945,
-    "rvol": 1.4558286021508176,
+    "rvol": 1.3871956559142624,
     "triggered": false
    },
    "missing": [
@@ -1426,7 +1439,7 @@
    "data_warnings": [
     "日线存在单日>35%波动，请确认拆股/复权或真实事件"
    ],
-   "earnings": "2026-11-12"
+   "earnings": null
   },
   {
    "ticker": "VST",
@@ -1826,7 +1839,7 @@
    "hourly": {
     "time": "11-12 15:30 ET",
     "close": 311.3299865722656,
-    "rvol": 1.076788526092457,
+    "rvol": 1.0764595596341724,
     "triggered": false
    },
    "missing": [
@@ -1981,7 +1994,7 @@
    "hourly": {
     "time": "11-12 15:30 ET",
     "close": 127.1500015258789,
-    "rvol": 4.3539584476176065,
+    "rvol": 0.6969909596637431,
     "triggered": false
    },
    "missing": [
@@ -2145,7 +2158,7 @@
    "hourly": {
     "time": "11-12 15:30 ET",
     "close": 244.6699981689453,
-    "rvol": 1.320685770015926,
+    "rvol": 1.3213430396432113,
     "triggered": false
    },
    "missing": [
