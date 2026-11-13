@@ -548,25 +548,34 @@ def macro_monitor(raw, now):
     flags = pd.concat([(ndx > ndx_ma).rename("ndx"), (dxy < dxy_ma).rename("dxy"),
                        ((vix >= VIX_PANIC) | ((vix >= VIX_ALERT) & (vix >= VIX_SPIKE_MULT * vix_ma20))).rename("vix")],
                       axis=1, join="inner").dropna()
-    all3 = flags.all(axis=1)
-    vals = all3.values
-    n = len(vals)
-    streak = 0
-    for v in vals[::-1]:
-        if v:
-            streak += 1
-        else:
-            break
-    prior = [i for i in range(n - streak) if vals[i]]
+    def _stats(series):
+        vals = series.values
+        n = len(vals)
+        streak = 0
+        for v in vals[::-1]:
+            if v:
+                streak += 1
+            else:
+                break
+        prior = [k for k in range(n - streak) if vals[k]]
+        return dict(on=bool(vals[-1]), streak=streak, cnt252=int(series.iloc[-252:].sum()),
+                    last_prior=str(series.index[prior[-1]].date()) if prior else None)
+
+    strict = flags.all(axis=1)
+    # 放宽口径：最近3个交易日（含今天）内VIX曾恐慌，且今天纳指、美元条件仍成立
+    vix_recent = flags["vix"].astype(int).rolling(3, min_periods=1).max().astype(bool)
+    relaxed = flags["ndx"] & flags["dxy"] & vix_recent
+    panic_days = [str(d.date()) for d, f in flags["vix"].iloc[-3:].items() if f]
     res.update(
         ok=True,
         ndx=dict(close=float(ndx.iloc[-1]), ma=float(ndx_ma.iloc[-1]), date=str(ndx.index[-1].date()), flag=bool(ndx.iloc[-1] > ndx_ma.iloc[-1])),
         dxy=dict(close=float(dxy.iloc[-1]), ma=float(dxy_ma.iloc[-1]), date=str(dxy.index[-1].date()), flag=bool(dxy.iloc[-1] < dxy_ma.iloc[-1])),
         vix=dict(close=float(vix.iloc[-1]), ma20=float(vix_ma20.iloc[-1]), date=str(vix.index[-1].date()),
                  chg1=float(vix.iloc[-1] / vix.iloc[-2] - 1), flag=bool(flags["vix"].iloc[-1])),
-        count=int(flags.iloc[-1].sum()), resonance=bool(vals[-1]), streak=streak,
-        last_prior=str(flags.index[prior[-1]].date()) if prior else None,
-        cnt252=int(all3.iloc[-252:].sum()))
+        count=int(flags.iloc[-1].sum()), strict=_stats(strict), relaxed=_stats(relaxed), panic_days=panic_days)
+    # 兼容旧字段
+    res.update(resonance=res["strict"]["on"], streak=res["strict"]["streak"],
+               last_prior=res["strict"]["last_prior"], cnt252=res["strict"]["cnt252"])
     return res
 
 
@@ -581,11 +590,15 @@ def macro_block(m):
           f"| 纳斯达克100 收在200日均线上方 | {a['close']:.2f}（{a['date']}） | 200日均线 {a['ma']:.2f}（{(a['close'] / a['ma'] - 1):+.2%}） | {mk(a['flag'])} |",
           f"| 美元指数 收在200日均线下方 | {b['close']:.2f}（{b['date']}） | 200日均线 {b['ma']:.2f}（{(b['close'] / b['ma'] - 1):+.2%}） | {mk(b['flag'])} |",
           f"| VIX 恐慌（≥{VIX_PANIC:.0f}，或≥{VIX_ALERT:.0f}且≥20日均线×{VIX_SPIKE_MULT}） | {v['close']:.2f}（{v['date']}，日{pct(v['chg1'])}） | 20日均线 {v['ma20']:.2f} | {mk(v['flag'])} |", ""]
-    if m["resonance"]:
-        L.append(f"**三者共振：已触发**（连续 {m['streak']} 个交易日）。")
-    else:
-        L.append(f"**三者共振：未触发**（满足 {m['count']}/3）。")
-    L.append(f"近一年共振出现 {m['cnt252']} 个交易日；" + (f"最近一次在 {m['last_prior']}。" if m["last_prior"] else "更早的历史里没有出现过。"))
+    st, rl = m["strict"], m["relaxed"]
+
+    def line(name, d, extra=""):
+        head = f"已触发（连续 {d['streak']} 个交易日）" if d["on"] else f"未触发{extra}"
+        hist = f"近一年出现 {d['cnt252']} 个交易日；" + (f"最近一次在 {d['last_prior']}。" if d["last_prior"] else "更早的历史里没有出现过。")
+        return f"- **{name}：{head}**。{hist}"
+    L.append(line("严格口径（当天三者同时满足）", st, f"（满足 {m['count']}/3）"))
+    pd_txt = "、".join(m["panic_days"]) if m["panic_days"] else "最近3个交易日内没有"
+    L.append(line("放宽口径（最近3个交易日内VIX曾恐慌，且今天纳指、美元条件仍成立）", rl, f"（VIX恐慌日：{pd_txt}）"))
     L.append("*仅作为宏观背景提示，不改变个股评分和信号规则；VIX 的恐慌阈值是我设的初始值，可在文件顶部调整。*")
     return L
 
