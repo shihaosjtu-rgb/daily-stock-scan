@@ -278,7 +278,7 @@
    "dist_to_entry": null,
    "xcheck": "仅Yahoo单一来源",
    "data_warnings": [],
-   "earnings": null
+   "earnings": "2026-11-17"
   },
   {
    "ticker": "GOOGL",
@@ -458,11 +458,11 @@
     "sma50": -0.005139650706755483,
     "sma200": 0.0009863140884542876
    },
-   "phase": "Phase D（候选）",
+   "phase": "SOS失败（收盘跌回突破位下方），突破无效",
    "events": {
-    "SOS": [
-     "2026-11-12",
-     "收盘364.36突破周线压力356.43，RVOL20=1.68，收于K线上部"
+    "SOS失败": [
+     "2026-11-13",
+     "收盘347.01（2026-11-13）跌回突破位356.43下方，突破失败"
     ]
    },
    "rs": {
@@ -471,27 +471,25 @@
     "rs20": 0.06922695510210053
    },
    "score": {
-    "wyckoff": 7,
-    "volume": 3,
+    "wyckoff": 0,
+    "volume": 0,
     "ma": 5,
     "env": 7,
     "rr": 0,
-    "total": 22,
+    "total": 12,
     "grade": "D",
     "updown_vol_ratio": 0.97,
     "ma_capped": false,
-    "decay": {
-     "SOS": 0.4
-    },
+    "decay": {},
     "quality": {},
-    "confluence": "突破位与周线压力区重合",
+    "confluence": null,
     "penalty": 0
    },
    "extension": {
     "pen": 0,
     "E": 0.3398689933013055,
     "ext_ema": 0.3398689933013055,
-    "ext_lvl": -0.8482103894693694,
+    "ext_lvl": 0.0,
     "run5": 0.028977633588859852,
     "chase": false
    },
@@ -556,8 +554,8 @@
    "plan": null,
    "hourly": null,
    "missing": [
-    "无有效止损（止损≥入场或已高于现价）",
-    "评分22<70"
+    "日线无 Spring/Test/SOS/LPS 候选事件，不生成触发方案",
+    "评分12<70"
    ],
    "executable": false,
    "dist_to_entry": null,
