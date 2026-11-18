@@ -138,7 +138,7 @@ def next_earnings(t):
             return None
         d0 = e[0]
         d0 = d0.date() if hasattr(d0, "date") else d0
-        return str(d0) if d0 >= dt.date.today() else None
+        return str(d0) if d0 >= dt.datetime.now(NY).date() else None
     except Exception:
         return None
 
@@ -214,6 +214,12 @@ def detect(d, sup, res, levels=None):
             if ok:
                 label = "区间阻力" if is_range else f"{tag}压力"
                 ev["SOS"] = (ts, f"收盘{b.close:.2f}突破{label}{R:.2f}，RVOL20={b.rvol20:.2f}，收于K线上部", R)
+    if "SOS" in ev:  # SOS之后若有收盘跌回突破位下方超过0.5ATR，视为突破失败（不是LPS回踩）
+        sts, R0 = ev["SOS"][0], ev["SOS"][2]
+        fail = d[(d.index > sts) & (d.close < R0 - 0.5 * float(d.atr14.iloc[-1]))]
+        if len(fail):
+            ev.pop("SOS")
+            ev["SOS失败"] = (fail.index[0], f"收盘{fail.close.iloc[0]:.2f}（{fail.index[0].date()}）跌回突破位{R0:.2f}下方，突破失败")
     if "SOS" in ev:
         R0 = ev["SOS"][2]
         for ts, b in last5.iterrows():
@@ -224,6 +230,8 @@ def detect(d, sup, res, levels=None):
 
 
 def phase_of(L, ev, sup=None):
+    if "SOS失败" in ev and not any(k in ev for k in ("Spring", "Test", "LPS")):
+        return "SOS失败（收盘跌回突破位下方），突破无效"
     if "Spring失败" in ev and not any(k in ev for k in ("Test", "SOS", "LPS")):
         return "Spring失败（收盘跌破Spring低点），吸筹假设作废"
     ref = sup
